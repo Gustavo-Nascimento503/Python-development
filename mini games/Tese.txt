@@ -13,6 +13,7 @@ import base64
 import contextlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -200,9 +201,6 @@ _MESES = {
     7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
 }
 
-#Remove-Item Env:NODE_TLS_REJECT_UNAUTHORIZED -ErrorAction SilentlyContinue
-#python "C:\Users\gsnascimento\Downloads\ProjetoGallUc\gall_health_project\src\gall_health\webscrapings\fornecedores\id3_local.py"
-
 _BIN: list[str] | None = None
 _TLS = threading.local()
 
@@ -288,7 +286,7 @@ COMPATIBILIDADE_INIT_SCRIPT = r"""
         return originalQuery(params);
     };
 
-    // Notification.permission = "default" (não "denied")
+    // Notification.permission = "default" (nao "denied")
     Object.defineProperty(Notification, "permission", {
         get() { return "default"; },
         configurable: true
@@ -312,7 +310,7 @@ COMPATIBILIDADE_INIT_SCRIPT = r"""
     patchWebGL(WebGL2RenderingContext?.prototype);
 
     // ======================================
-    // Canvas (ruído determinístico)
+    // Canvas (ruido deterministico)
     // ======================================
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = function(type) {
@@ -386,7 +384,7 @@ COMPATIBILIDADE_INIT_SCRIPT = r"""
     };
 
 })();
-"""   
+"""
 
 
 @dataclass
@@ -456,6 +454,7 @@ def _bin() -> list[str]:
     raise FileNotFoundError(
         "playwright-cli ausente. Instale com: npm install -g @playwright/cli"
     )
+
 
 def validar_ambiente_grafico() -> None:
     if not EXECUCAO_DATABRICKS:
@@ -527,6 +526,7 @@ def validar_ambiente_grafico() -> None:
         f"{display}"
     )
 
+
 def _cwd() -> Path:
     cwd = getattr(_TLS, "cwd", None)
     if cwd is not None:
@@ -563,6 +563,9 @@ def _ensure_cli_config(cwd: Path) -> Path:
     if browser_name not in {"chromium", "firefox", "webkit"}:
         raise ValueError(f"SULAMERICA_BROWSER invalido: {browser_name!r}")
 
+    # CORREÇÃO: usar Chrome real se disponível (mais difícil de detectar)
+    channel = os.getenv("SULAMERICA_CHANNEL", "").strip() or None
+
     config = {
         "browser": {
             "browserName": browser_name,
@@ -571,9 +574,7 @@ def _ensure_cli_config(cwd: Path) -> Path:
             "initScript": [str(caminho_init_script)],
             "launchOptions": {
                 "chromiumSandbox": False,
-                "downloadsPath": str(
-                    downloads
-                ),
+                "downloadsPath": str(downloads),
                 "headless": (
                     os.getenv(
                         "SULAMERICA_CLI_HEADED",
@@ -587,13 +588,21 @@ def _ensure_cli_config(cwd: Path) -> Path:
                         "yes",
                     }
                 ),
+                # CORREÇÃO: ignorar --enable-automation (sinal de bot)
+                "ignoreDefaultArgs": ["--enable-automation"],
                 "args": [
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                    "--window-size=1366,768",
+                    # CORREÇÃO: esconder navigator.webdriver no nível do Blink
+                    "--disable-blink-features=AutomationControlled",
+                    # CORREÇÃO: evitar isolamento de origens (pode causar inconsistências)
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--window-size=1920,1080",
                     "--window-position=0,0",
                     "--lang=pt-BR",
+                    "--no-first-run",
+                    "--no-default-browser-check",
                 ],
             },
             "contextOptions": {
@@ -601,8 +610,9 @@ def _ensure_cli_config(cwd: Path) -> Path:
                 "ignoreHTTPSErrors": True,
                 "locale": "pt-BR",
                 "timezoneId": "America/Sao_Paulo",
-                "viewport": {"width": 1366, "height": 768},
-                "screen": {"width": 1366, "height": 768},
+                # CORREÇÃO: viewport mais realista
+                "viewport": {"width": 1920, "height": 1080},
+                "screen": {"width": 1920, "height": 1080},
                 "deviceScaleFactor": 1,
                 "isMobile": False,
                 "hasTouch": False,
@@ -620,6 +630,11 @@ def _ensure_cli_config(cwd: Path) -> Path:
         },
         "console": {"level": "info"},
     }
+
+    # CORREÇÃO: channel "chrome" para usar Chrome real (opcional via env)
+    if channel:
+        config["browser"]["launchOptions"]["channel"] = channel
+
     caminho = cwd / "config" / "playwright-cli.json"
     caminho.parent.mkdir(parents=True, exist_ok=True)
     caminho.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -742,6 +757,100 @@ def abas() -> list[dict[str, Any]]:
         {"indice": int(r.group(1)), "atual": bool(r.group(2)), "titulo": r.group(3), "url": r.group(4)}
         for r in re.finditer(r"-\s+(\d+):\s+(\(current\)\s+)?\[([^\]]*)\]\(([^)]+)\)", bruto)
     ]
+
+
+# ======================================
+# NOVAS FUNÇÕES: COMPORTAMENTO HUMANO
+# ======================================
+
+def _delay_humano(min_ms: int = 300, max_ms: int = 1200) -> None:
+    """Delay aleatório simulando hesitação humana."""
+    time.sleep(random.uniform(min_ms, max_ms) / 1000.0)
+
+
+def _simular_atividade() -> None:
+    """
+    CORREÇÃO: Simula movimento de mouse e scroll antes de interagir.
+    O reCAPTCHA v3 analisa o comportamento pré-login.
+    Sem mouse/scroll, o score fica ~0.1.
+    """
+    conta = getattr(_TLS, "conta", "") or ""
+    print(f"[SULAMERICA/{conta}] simulando atividade humana (mouse + scroll)...")
+
+    # Movimento de mouse em curvas (Bézier simplificada)
+    for _ in range(random.randint(5, 10)):
+        x1 = random.randint(100, 1800)
+        y1 = random.randint(100, 900)
+        x2 = random.randint(100, 1800)
+        y2 = random.randint(100, 900)
+        steps = random.randint(15, 35)
+        for i in range(steps):
+            t = i / steps
+            # smoothstep easing
+            t = t * t * (3 - 2 * t)
+            x = int(x1 + (x2 - x1) * t)
+            y = int(y1 + (y2 - y1) * t)
+            cli("mouse", "move", str(x), str(y), check=False)
+            time.sleep(random.uniform(0.004, 0.015))
+        time.sleep(random.uniform(0.1, 0.4))
+
+    # Scroll natural
+    for _ in range(random.randint(2, 4)):
+        delta = random.randint(80, 300)
+        cli("mouse", "wheel", "0", str(delta), check=False)
+        time.sleep(random.uniform(0.3, 0.8))
+
+    # Scroll de volta
+    cli("mouse", "wheel", "0", str(-random.randint(50, 200)), check=False)
+    time.sleep(random.uniform(0.2, 0.5))
+
+    print(f"[SULAMERICA/{conta}] atividade simulada concluída")
+
+
+def _human_type(seletor: str, texto: str, sensivel: bool = False) -> None:
+    """
+    CORREÇÃO: Digitação char-by-char com delay aleatório (Gaussian).
+    Substitui o `fill` instantâneo que é um sinal claro de automação.
+    """
+    # Click no campo primeiro
+    cli("click", seletor, check=False)
+    _delay_humano(200, 600)
+
+    # Digitar caractere por caractere
+    for char in texto:
+        # Delay Gaussian: média 90ms, desvio 30ms, clamp [30, 250]
+        delay_ms = random.gauss(90, 30)
+        delay_ms = max(30, min(250, delay_ms))
+        time.sleep(delay_ms / 1000.0)
+
+        # 5% chance de pausa mais longa (hesitação)
+        if random.random() < 0.05:
+            time.sleep(random.uniform(0.2, 0.5))
+
+        cli("keyboard", "type", char, check=False)
+
+    _delay_humano(300, 800)
+
+
+def _limpar_profile_cookies(perfil: Path) -> None:
+    """
+    CORREÇÃO: Limpa cookies do profile antes de cada execução.
+    Evita acumular sessão "suja" que o reCAPTCHA usa para pontuar.
+    Mantém o profile (cache, etc.) mas zera os cookies.
+    """
+    # Cookies são armazenados em Cookies (SQLite) ou Network/Cookies
+    for nome_cookie in ("Cookies", "Cookies-journal", "cookies.sqlite"):
+        for pasta in (perfil, perfil / "Default", perfil / "Network"):
+            caminho = pasta / nome_cookie
+            if caminho.exists():
+                caminho.unlink(missing_ok=True)
+                print(f"[SULAMERICA] cookie limpo: {caminho}")
+
+    # Limpar Local Storage (pode conter tokens reCAPTCHA antigos)
+    for pasta_ls in (perfil / "Default" / "Local Storage" / "leveldb",):
+        if pasta_ls.exists():
+            shutil.rmtree(pasta_ls, ignore_errors=True)
+            print(f"[SULAMERICA] local storage limpo: {pasta_ls}")
 
 
 def normalizar_contrato(valor: Any) -> str:
@@ -915,6 +1024,7 @@ def _aguardar_relatorios() -> bool:
 def _abrir_area_relatorios() -> str:
     abas_antes = {aba["indice"] for aba in abas()}
     cli("click", f"xpath={XPATH_FERRAMENTAS}")
+
     def selecionar_nova_aba():
         lista = abas()
         novas = [aba for aba in lista if aba["indice"] not in abas_antes]
@@ -924,6 +1034,7 @@ def _abrir_area_relatorios() -> str:
         if not alvo["atual"]:
             cli("tab-select", str(alvo["indice"]), check=False)
         return alvo
+
     if not esperar(selecionar_nova_aba, timeout=30):
         raise RuntimeError("O portal nao abriu a aba de relatorios")
     if not _aguardar_relatorios():
@@ -1015,6 +1126,7 @@ def _aguardar_resultado_login(timeout: float = 90, intervalo: float = 1.0) -> di
         time.sleep(intervalo)
     return {**ultimo, "status": "timeout"}
 
+
 def diagnosticar_ambiente_navegador() -> dict[str, Any]:
     retorno = js(
         """(() => JSON.stringify({
@@ -1074,6 +1186,7 @@ def diagnosticar_ambiente_navegador() -> dict[str, Any]:
 
     return {}
 
+
 def _executar_conta(*, conta: ContaSulAmerica, competencias: list[date], diretorio_saida: Path, resultado: SulAmericaResultado) -> None:
     pasta_execucao = Path(
         tempfile.mkdtemp(
@@ -1092,6 +1205,10 @@ def _executar_conta(*, conta: ContaSulAmerica, competencias: list[date], diretor
     _TLS.conta = conta.conta
     _TLS.session = f"sa3-{normalizar_nome_arquivo(conta.login, 20)}-{os.getpid()}-{int(time.time()*1000)}"
     try:
+        # CORREÇÃO: Limpar cookies antes de cada execução
+        # Evita que sessão "suja" anterior penalize o score do reCAPTCHA
+        _limpar_profile_cookies(perfil_conta)
+
         caminho_config = _ensure_cli_config(
             pasta_execucao
         )
@@ -1158,116 +1275,4 @@ def _executar_conta(*, conta: ContaSulAmerica, competencias: list[date], diretor
                         && !usuario.disabled
                         && !senha.disabled
                         && !botao.disabled
-                      );
-                    })()"""
-                )
-            ),
-            timeout=90,
-            intervalo=1.0,
-        )
-
-        if not pagina_login_pronta:
-            salvar_diagnostico(
-                etapa="login_nao_carregado",
-                conta=conta.conta,
-            )
-
-            raise RuntimeError(
-                "A pagina de login nao ficou pronta."
-            )
-
-        time.sleep(
-            2.0
-        )
-        cli("fill", 'xpath=//*[@id="formLogin"]/div[1]/input', conta.login)
-        cli("fill", 'xpath=//*[@id="formLogin"]/div[2]/input', conta.senha, sensivel=True)
-        cli("click", 'xpath=//*[@id="formLogin"]/div[3]/input')
-        estado = _aguardar_resultado_login()
-        if estado.get("status") == "recaptcha":
-            salvar_diagnostico("recaptcha_login", conta.conta)
-            raise SulAmericaRecaptchaError("O portal solicitou reCAPTCHA durante a autenticacao.")
-        if estado.get("status") != "autenticado":
-            salvar_diagnostico(f"{estado.get('status')}_login", conta.conta)
-            raise RuntimeError(f"Login nao concluido: {estado!r}")
-        salvar_diagnostico("apos_login", conta.conta)
-        url_menu = _abrir_area_relatorios()
-        opcoes = _listar_opcoes(SELECT_APOLICE)
-        if not opcoes:
-            raise SulAmericaSemDadosError("Nenhuma apolice disponivel para a credencial")
-        apolices = _mapear_apolices(opcoes, resultado)
-        _baixar_cadastros(apolices=apolices, competencias=competencias, diretorio_saida=diretorio_saida, resultado=resultado)
-        _voltar_menu_relatorios(url_menu)
-        _entrar_gerencial()
-        _baixar_gerenciais(apolices=apolices, competencias=competencias, diretorio_saida=diretorio_saida, resultado=resultado)
-    except SulAmericaRecaptchaError as erro:
-        resultado.pulados.append(f"conta={conta.conta}; motivo=recaptcha; detalhe={erro}")
-    except Exception as erro:
-        resultado.erros.append(f"conta={conta.conta}; erro={erro}")
-    finally:
-        cli("close", check=False)
-        shutil.rmtree(pasta_execucao, ignore_errors=True)
-        _TLS.cwd = _TLS.downloads = _TLS.profile = None
-        _TLS.conta = _TLS.session = ""
-
-
-class SulAmericaWebscraping:
-    def executar_downloads(self, *, dtcompetenciaini, dtcompetenciafim, diretorio_saida: str | Path, status_write=print, **_kw) -> SulAmericaResultado:
-        global _BIN
-        _BIN = None
-        emit = status_write or (lambda *_args, **_kwargs: None)
-        resultado = SulAmericaResultado(ok=False)
-        diretorio_saida = Path(diretorio_saida).resolve()
-        diretorio_saida.mkdir(parents=True, exist_ok=True)
-        try:
-            validar_ambiente_grafico()
-            emit(f"[SULAMERICA] playwright-cli={_bin()}")
-            competencias = list(iterar_competencias(dtcompetenciaini, dtcompetenciafim))
-            contas = carregar_contas_sulamerica()
-            emit(f"[SULAMERICA] contas={len(contas)}; competencias={len(competencias)}; id_empresa=0")
-            for conta in contas:
-                _executar_conta(conta=conta, competencias=competencias, diretorio_saida=diretorio_saida, resultado=resultado)
-            resultado.ok = bool(resultado.arquivos)
-            resultado.detail = f"cadastros={len(resultado.cadastros)}; gerenciais={len(resultado.gerenciais)}; pulados={len(resultado.pulados)}; erros={len(resultado.erros)}"
-            if not resultado.ok:
-                raise RuntimeError(f"Nenhum arquivo foi baixado. Pulados={resultado.pulados}; erros={resultado.erros}")
-        except Exception as erro:
-            resultado.detail = str(erro)
-            if not resultado.erros or str(erro) not in resultado.erros[-1]:
-                resultado.erros.append(str(erro))
-        return resultado
-
-    def sul_america(self, **kwargs) -> SulAmericaResultado:
-        return self.executar_downloads(**kwargs)
-
-
-def main() -> int:
-    competencia_inicial = "2026-10"
-    competencia_final = "2026-10"
-    diretorio_saida = DIRETORIO_RUNTIME / "arquivos_sulamerica"
-    resultado = SulAmericaWebscraping().executar_downloads(
-        dtcompetenciaini=competencia_inicial,
-        dtcompetenciafim=competencia_final,
-        diretorio_saida=diretorio_saida,
-        status_write=print,
-    )
-    print("\n" + "=" * 70)
-    print("RESULTADO DA EXECUCAO")
-    print("=" * 70)
-    print(f"OK: {resultado.ok}")
-    print(f"Detalhe: {resultado.detail}")
-    for titulo, itens in (("CADASTROS", resultado.cadastros), ("GERENCIAIS", resultado.gerenciais), ("PULADOS", resultado.pulados), ("ERROS", resultado.erros)):
-        if itens:
-            print(f"\n{titulo}:")
-            for item in itens:
-                print(f"  - {item}")
-    return 0 if resultado.ok else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
-__all__ = [
-    "SulAmericaResultado", "SulAmericaSemDadosError", "SulAmericaRecaptchaError",
-    "SulAmericaWebscraping", "carregar_contas_sulamerica", "normalizar_contrato", "main",
-]
+                   
