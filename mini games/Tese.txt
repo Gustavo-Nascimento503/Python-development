@@ -1,3 +1,211 @@
+from __future__ import annotations
+
+"""Web scraping SulAmerica (id 3) usando playwright-cli em maquina local.
+
+Execucao direta:
+    python id3_local.py
+
+Antes de executar, preencha USUARIO_SULAMERICA e SENHA_SULAMERICA.
+Os arquivos sao salvos localmente com id_empresa=0, sem Spark, Databricks ou gall_health.
+"""
+
+import base64
+import contextlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Iterable
+
+from dateutil.relativedelta import relativedelta
+
+
+if "__file__" in globals():
+    ARQUIVO_ATUAL = Path(
+        __file__
+    ).resolve()
+
+    DIRETORIO_PROJETO = (
+        ARQUIVO_ATUAL.parent
+    )
+else:
+    ARQUIVO_ATUAL = None
+
+    DIRETORIO_PROJETO = Path.cwd()
+
+
+EXECUCAO_DATABRICKS = bool(
+    os.getenv(
+        "DATABRICKS_RUNTIME_VERSION"
+    )
+)
+
+
+if EXECUCAO_DATABRICKS:
+    DIRETORIO_RUNTIME = Path(
+        "/local_disk0/sulamerica_local"
+    )
+else:
+    DIRETORIO_RUNTIME = (
+        DIRETORIO_PROJETO
+    )
+
+
+DIRETORIO_RUNTIME.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+DIRETORIO_PROFILE = (
+    DIRETORIO_RUNTIME
+    / "sulamerica_profiles"
+)
+
+DIRETORIO_LOGS = (
+    DIRETORIO_RUNTIME
+    / "logs"
+)
+
+DIRETORIO_PLAYWRIGHT = (
+    DIRETORIO_RUNTIME
+    / ".playwright_cli"
+)
+
+DIRETORIO_DOWNLOADS = (
+    DIRETORIO_RUNTIME
+    / "downloads"
+)
+
+DIRETORIO_ARQUIVOS = (
+    DIRETORIO_RUNTIME
+    / "arquivos_sulamerica"
+)
+
+
+for diretorio in (
+    DIRETORIO_PROFILE,
+    DIRETORIO_LOGS,
+    DIRETORIO_PLAYWRIGHT,
+    DIRETORIO_DOWNLOADS,
+    DIRETORIO_ARQUIVOS,
+):
+    diretorio.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+if EXECUCAO_DATABRICKS:
+    os.environ["DISPLAY"] = (
+        os.getenv(
+            "DISPLAY"
+        )
+        or ":99"
+    )
+
+
+os.environ["SULAMERICA_CLI_HEADED"] = (
+    os.getenv(
+        "SULAMERICA_CLI_HEADED"
+    )
+    or "1"
+)
+
+os.environ["SULAMERICA_BROWSER"] = (
+    os.getenv(
+        "SULAMERICA_BROWSER"
+    )
+    or "chromium"
+)
+
+os.environ["SULAMERICA_PROFILE_DIR"] = str(
+    DIRETORIO_PROFILE
+)
+
+os.environ["SULAMERICA_LOG_DIR"] = str(
+    DIRETORIO_LOGS
+)
+
+os.environ["PLAYWRIGHT_CLI_CWD"] = str(
+    DIRETORIO_PLAYWRIGHT
+)
+
+
+print(
+    f"[SULAMERICA] "
+    f"execucao_databricks="
+    f"{EXECUCAO_DATABRICKS}"
+)
+
+print(
+    f"[SULAMERICA] "
+    f"diretorio_projeto="
+    f"{DIRETORIO_PROJETO}"
+)
+
+print(
+    f"[SULAMERICA] "
+    f"diretorio_runtime="
+    f"{DIRETORIO_RUNTIME}"
+)
+
+print(
+    f"[SULAMERICA] "
+    f"profile_dir="
+    f"{DIRETORIO_PROFILE}"
+)
+
+print(
+    f"[SULAMERICA] "
+    f"log_dir="
+    f"{DIRETORIO_LOGS}"
+)
+
+print(
+    f"[SULAMERICA] "
+    f"display="
+    f"{os.getenv('DISPLAY', '')}"
+)
+
+print(
+    f"[SULAMERICA] "
+    f"headed="
+    f"{os.environ['SULAMERICA_CLI_HEADED']}"
+)
+
+URL_LOGIN = "https://corretor.sulamericaseguros.com.br/"
+INTEGRACAO = "SulAméricaWebScraping"
+CONTA_LOCAL = "sulamerica_local"
+
+SELECT_APOLICE = 'select[id="j_id5:apolices"]'
+SELECT_MES = 'select[id="j_id5:mes"]'
+SELECT_ANO = 'select[id="j_id5:ano"]'
+SELECT_SUBFATURA = 'select[id="j_id5:empresas"]'
+XPATH_FERRAMENTAS = "/html/body/app-root/app-home/div/app-card-ferramentas/div/div[2]/a[9]"
+XPATH_MENU_GERENCIAL = '//*[@id="exportPDF"]/div[1]/ul/li/a'
+XPATH_CADASTRO = '//*[@id="exportPDF"]/div[5]/ul/li[4]/a'
+SELETOR_CSV_GERENCIAL = '#exportPDF\\:exportIconCSV'
+
+_MESES = {
+    1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun",
+    7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
+}
+
+#Remove-Item Env:NODE_TLS_REJECT_UNAUTHORIZED -ErrorAction SilentlyContinue
+#python "C:\Users\gsnascimento\Downloads\ProjetoGallUc\gall_health_project\src\gall_health\webscrapings\fornecedores\id3_local.py"
+
+_BIN: list[str] | None = None
+_TLS = threading.local()
+
 COMPATIBILIDADE_INIT_SCRIPT = r"""
 (() => {
 
@@ -179,3 +387,887 @@ COMPATIBILIDADE_INIT_SCRIPT = r"""
 
 })();
 """   
+
+
+@dataclass
+class SulAmericaResultado:
+    ok: bool
+    cadastros: list[str] = field(default_factory=list)
+    gerenciais: list[str] = field(default_factory=list)
+    pulados: list[str] = field(default_factory=list)
+    erros: list[str] = field(default_factory=list)
+    detail: str = ""
+
+    @property
+    def arquivos(self) -> list[str]:
+        return [*self.cadastros, *self.gerenciais]
+
+
+@dataclass(frozen=True)
+class ContaSulAmerica:
+    conta: str
+    login: str
+    senha: str
+
+
+class SulAmericaSemDadosError(Exception):
+    pass
+
+
+class SulAmericaRecaptchaError(Exception):
+    pass
+
+
+def _bin() -> list[str]:
+    global _BIN
+    if _BIN:
+        return _BIN
+
+    configurado = (os.getenv("PLAYWRIGHT_CLI_BIN") or "").strip()
+    if configurado:
+        partes = configurado.split()
+        if len(partes) == 1 and partes[0].lower().endswith(".js"):
+            node = shutil.which("node.exe") or shutil.which("node")
+            if not node:
+                raise FileNotFoundError("node nao encontrado")
+            _BIN = [node, partes[0]]
+        else:
+            _BIN = partes
+        return _BIN
+
+    node = shutil.which("node.exe") or shutil.which("node")
+    caminhos_js = [
+        Path(os.getenv("APPDATA") or "") / "npm/node_modules/@playwright/cli/playwright-cli.js",
+        Path("/usr/local/lib/node_modules/@playwright/cli/playwright-cli.js"),
+        Path("/usr/lib/node_modules/@playwright/cli/playwright-cli.js"),
+    ]
+    if node:
+        for caminho_js in caminhos_js:
+            if caminho_js.is_file():
+                _BIN = [node, str(caminho_js)]
+                return _BIN
+
+    for nome in ("playwright-cli.exe", "playwright-cli"):
+        executavel = shutil.which(nome)
+        if executavel and not executavel.lower().endswith(".cmd"):
+            _BIN = [executavel]
+            return _BIN
+
+    raise FileNotFoundError(
+        "playwright-cli ausente. Instale com: npm install -g @playwright/cli"
+    )
+
+def validar_ambiente_grafico() -> None:
+    if not EXECUCAO_DATABRICKS:
+        return
+
+    headed = (
+        os.getenv(
+            "SULAMERICA_CLI_HEADED",
+            "",
+        )
+        .strip()
+        .lower()
+        in {
+            "1",
+            "true",
+            "yes",
+        }
+    )
+
+    if not headed:
+        return
+
+    display = (
+        os.getenv(
+            "DISPLAY",
+            "",
+        )
+        .strip()
+    )
+
+    if not display:
+        raise RuntimeError(
+            "SULAMERICA_CLI_HEADED=1, "
+            "mas DISPLAY nao foi definido."
+        )
+
+    xdpyinfo = shutil.which(
+        "xdpyinfo"
+    )
+
+    if not xdpyinfo:
+        raise RuntimeError(
+            "xdpyinfo nao encontrado. "
+            "Instale os pacotes xvfb e x11-utils."
+        )
+
+    processo = subprocess.run(
+        [
+            xdpyinfo,
+            "-display",
+            display,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+
+    if processo.returncode != 0:
+        raise RuntimeError(
+            "O display virtual nao esta disponivel. "
+            f"DISPLAY={display!r}; "
+            f"erro={processo.stderr[-500:]!r}"
+        )
+
+    print(
+        f"[SULAMERICA] "
+        f"display virtual validado: "
+        f"{display}"
+    )
+
+def _cwd() -> Path:
+    cwd = getattr(_TLS, "cwd", None)
+    if cwd is not None:
+        return Path(cwd)
+    configurado = (os.getenv("PLAYWRIGHT_CLI_CWD") or "").strip()
+    cwd = Path(configurado) if configurado else DIRETORIO_PROJETO / ".playwright_cli"
+    cwd.mkdir(parents=True, exist_ok=True)
+    return cwd
+
+
+def _downloads_dir() -> Path:
+    downloads = getattr(_TLS, "downloads", None)
+    if downloads is None:
+        downloads = _cwd() / "downloads"
+    downloads = Path(downloads)
+    downloads.mkdir(parents=True, exist_ok=True)
+    return downloads
+
+
+def _ensure_init_script(cwd: Path) -> Path:
+    pasta_scripts = cwd / "config" / "scripts"
+    pasta_scripts.mkdir(parents=True, exist_ok=True)
+    caminho_script = pasta_scripts / "sulamerica_init.js"
+    caminho_script.write_text(COMPATIBILIDADE_INIT_SCRIPT.strip() + "\n", encoding="utf-8")
+    return caminho_script.resolve()
+
+
+def _ensure_cli_config(cwd: Path) -> Path:
+    downloads = _downloads_dir().resolve()
+    perfil = Path(getattr(_TLS, "profile", cwd / "profile")).resolve()
+    perfil.mkdir(parents=True, exist_ok=True)
+    caminho_init_script = _ensure_init_script(cwd)
+    browser_name = os.getenv("SULAMERICA_BROWSER", "chromium").strip().lower()
+    if browser_name not in {"chromium", "firefox", "webkit"}:
+        raise ValueError(f"SULAMERICA_BROWSER invalido: {browser_name!r}")
+
+    config = {
+        "browser": {
+            "browserName": browser_name,
+            "isolated": False,
+            "userDataDir": str(perfil),
+            "initScript": [str(caminho_init_script)],
+            "launchOptions": {
+                "chromiumSandbox": False,
+                "downloadsPath": str(
+                    downloads
+                ),
+                "headless": (
+                    os.getenv(
+                        "SULAMERICA_CLI_HEADED",
+                        "",
+                    )
+                    .strip()
+                    .lower()
+                    not in {
+                        "1",
+                        "true",
+                        "yes",
+                    }
+                ),
+                "args": [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--window-size=1366,768",
+                    "--window-position=0,0",
+                    "--lang=pt-BR",
+                ],
+            },
+            "contextOptions": {
+                "acceptDownloads": True,
+                "ignoreHTTPSErrors": True,
+                "locale": "pt-BR",
+                "timezoneId": "America/Sao_Paulo",
+                "viewport": {"width": 1366, "height": 768},
+                "screen": {"width": 1366, "height": 768},
+                "deviceScaleFactor": 1,
+                "isMobile": False,
+                "hasTouch": False,
+                "colorScheme": "light",
+                "permissions": [],
+                "serviceWorkers": "allow",
+                "extraHTTPHeaders": {
+                    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+                },
+            },
+        },
+        "timeouts": {
+            "action": 30000, "navigation": 90000,
+            "expect": 30000, "settle": 1000,
+        },
+        "console": {"level": "info"},
+    }
+    caminho = cwd / "config" / "playwright-cli.json"
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    return caminho
+
+
+def cli(*args: str, check: bool = True, sensivel: bool = False, timeout: int = 180) -> str:
+    sessao = getattr(_TLS, "session", "") or ""
+    conta = getattr(_TLS, "conta", "") or ""
+    prefixo = [f"-s={sessao}"] if sessao else []
+    exibicao = [*prefixo, *args]
+    if sensivel and exibicao:
+        exibicao[-1] = "***"
+    print(f"[SULAMERICA{f'/{conta}' if conta else ''}] $ {' '.join(exibicao)[:180]}")
+
+    processo = subprocess.run(
+        [*_bin(), *prefixo, *args], capture_output=True, encoding="utf-8",
+        errors="replace", timeout=timeout, check=False, cwd=str(_cwd()),
+        env={**os.environ, "NODE_TLS_REJECT_UNAUTHORIZED": os.getenv("NODE_TLS_REJECT_UNAUTHORIZED", "0")},
+    )
+    stdout = processo.stdout or ""
+    stderr = processo.stderr or ""
+    if sensivel:
+        saida = ""
+        if stdout.strip() or stderr.strip():
+            print(f"[SULAMERICA{f'/{conta}' if conta else ''}] saida de comando sensivel omitida")
+    else:
+        saida = stdout + (f"\n{stderr}" if stderr else "")
+        if saida.strip():
+            print(saida[:1500] + ("\n..." if len(saida) > 1500 else ""))
+    if check and processo.returncode:
+        detalhe = "detalhes omitidos por conterem argumento sensivel" if sensivel else (stderr or stdout)[:400]
+        raise RuntimeError(f"playwright-cli {args[:2]} retornou {processo.returncode}: {detalhe}")
+    return saida
+
+
+def js(codigo: str) -> Any:
+    codigo_b64 = base64.b64encode(
+        codigo.encode("utf-8")
+    ).decode("ascii")
+
+    bruto = cli(
+        "eval",
+        f"(()=>eval(atob('{codigo_b64}')))()",
+        check=False,
+    )
+
+    resultado = re.search(
+        r"### Result\s*\n\s*(.*?)\s*"
+        r"(?:\n### |\n*$)",
+        bruto,
+        re.DOTALL,
+    )
+
+    if not resultado:
+        return None
+
+    corpo = resultado.group(1).strip()
+
+    if (
+        not corpo
+        or corpo == "undefined"
+    ):
+        return None
+
+    valor: Any = corpo
+
+    for _ in range(4):
+        if not isinstance(
+            valor,
+            str,
+        ):
+            break
+
+        texto = valor.strip()
+
+        if not texto:
+            return None
+
+        try:
+            valor_decodificado = json.loads(
+                texto
+            )
+        except json.JSONDecodeError:
+            break
+
+        if valor_decodificado == valor:
+            break
+
+        valor = valor_decodificado
+
+    if isinstance(
+        valor,
+        str,
+    ):
+        return valor.strip('"')
+
+    return valor
+
+
+def esperar(predicado, timeout: float = 30, intervalo: float = 0.5):
+    limite = time.time() + timeout
+    ultimo_erro: Exception | None = None
+    while time.time() < limite:
+        try:
+            valor = predicado()
+            if valor:
+                return valor
+        except Exception as erro:
+            ultimo_erro = erro
+        time.sleep(intervalo)
+    if ultimo_erro:
+        print(f"[SULAMERICA] ultima falha durante espera: {ultimo_erro}")
+    return None
+
+
+def abas() -> list[dict[str, Any]]:
+    bruto = cli("tab-list", check=False)
+    return [
+        {"indice": int(r.group(1)), "atual": bool(r.group(2)), "titulo": r.group(3), "url": r.group(4)}
+        for r in re.finditer(r"-\s+(\d+):\s+(\(current\)\s+)?\[([^\]]*)\]\(([^)]+)\)", bruto)
+    ]
+
+
+def normalizar_contrato(valor: Any) -> str:
+    texto = str(valor or "").strip()
+    if re.fullmatch(r"\d+\.0", texto):
+        texto = texto[:-2]
+    return "".join(c for c in texto if c.isalnum()).upper()
+
+
+def normalizar_nome_arquivo(valor: Any, limite: int = 120) -> str:
+    texto = unicodedata.normalize("NFKD", str(valor or ""))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r'[\\/:*?"<>|]+', "_", texto)
+    texto = re.sub(r"\s+", "_", texto.strip())
+    texto = re.sub(r"_+", "_", texto).strip("._")
+    return (texto or "arquivo")[:limite]
+
+
+def salvar_diagnostico(etapa: str, conta: str) -> dict[str, str]:
+    pasta_conta = Path(os.getenv("SULAMERICA_LOG_DIR", str(DIRETORIO_PROJETO / "logs"))) / normalizar_nome_arquivo(conta)
+    pasta_conta.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nome_base = f"{timestamp}_{normalizar_nome_arquivo(etapa)}"
+    pasta_temporaria = _cwd() / "diagnosticos"
+    pasta_temporaria.mkdir(parents=True, exist_ok=True)
+    screenshot_tmp = pasta_temporaria / f"{nome_base}.png"
+    snapshot_tmp = pasta_temporaria / f"{nome_base}.yml"
+    screenshot_final = pasta_conta / screenshot_tmp.name
+    snapshot_final = pasta_conta / snapshot_tmp.name
+    pagina_final = pasta_conta / f"{nome_base}_pagina.json"
+    console_final = pasta_conta / f"{nome_base}_console.txt"
+    abas_final = pasta_conta / f"{nome_base}_abas.json"
+
+    cli("screenshot", f"--filename={screenshot_tmp}", check=False)
+    if screenshot_tmp.is_file():
+        shutil.copy2(screenshot_tmp, screenshot_final)
+    cli("snapshot", f"--filename={snapshot_tmp}", check=False)
+    if snapshot_tmp.is_file():
+        shutil.copy2(snapshot_tmp, snapshot_final)
+
+    diagnostico = js("""(()=>JSON.stringify({url:String(location.href||''),titulo:String(document.title||''),texto:String(document.body?.innerText||'').replace(/\\s+/g,' ').trim(),possuiLogin:!!document.querySelector('#formLogin'),possuiHome:!!document.querySelector('app-home'),possuiRecaptcha:!!document.querySelector('iframe[src*=\"recaptcha\"],.g-recaptcha')}))()""")
+    pagina_final.write_text(json.dumps(diagnostico, ensure_ascii=False, indent=2), encoding="utf-8")
+    console_final.write_text(cli("console", check=False), encoding="utf-8")
+    abas_final.write_text(json.dumps(abas(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "screenshot": str(screenshot_final) if screenshot_final.is_file() else "",
+        "snapshot": str(snapshot_final) if snapshot_final.is_file() else "",
+        "pagina": str(pagina_final), "console": str(console_final), "abas": str(abas_final),
+    }
+
+
+def _para_data(valor: Any) -> date:
+    if isinstance(valor, datetime):
+        return valor.date().replace(day=1)
+    if isinstance(valor, date):
+        return valor.replace(day=1)
+    texto = str(valor or "").strip()
+    for formato in ("%Y-%m-%d", "%Y-%m", "%d/%m/%Y", "%m/%Y"):
+        with contextlib.suppress(ValueError):
+            return datetime.strptime(texto, formato).date().replace(day=1)
+    raise ValueError(f"Competencia invalida: {valor!r}")
+
+
+def iterar_competencias(inicio: Any, fim: Any) -> Iterable[date]:
+    atual = _para_data(inicio)
+    limite = _para_data(fim)
+    if atual > limite:
+        raise ValueError(f"Competencia inicial {atual} maior que a final {limite}")
+    while atual <= limite:
+        yield atual
+        atual += relativedelta(months=1)
+
+
+def carregar_contas_sulamerica() -> list[ContaSulAmerica]:
+    login = str(USUARIO_SULAMERICA or "").strip()
+    senha = str(SENHA_SULAMERICA or "").strip()
+    if not login or login == "COLOQUE_SEU_USUARIO_AQUI":
+        raise ValueError("Substitua USUARIO_SULAMERICA pelo usuario real.")
+    if not senha or senha == "COLOQUE_SUA_SENHA_AQUI":
+        raise ValueError("Substitua SENHA_SULAMERICA pela senha real.")
+    return [ContaSulAmerica(conta=CONTA_LOCAL, login=login, senha=senha)]
+
+
+def _listar_opcoes(seletor: str) -> list[dict[str, str]]:
+    retorno = js(f"""(()=>{{const s=document.querySelector({json.dumps(seletor)});if(!s)return JSON.stringify([]);return JSON.stringify([...s.options].map(o=>({{label:String(o.textContent||'').trim(),value:String(o.value||'')}})).filter(o=>o.label&&!o.label.toLowerCase().includes('selecione')));}})()""")
+    return retorno if isinstance(retorno, list) else []
+
+
+def _selecionar_opcao(seletor: str, *, label: str | None = None, value: str | None = None) -> dict[str, Any]:
+    retorno = js(f"""(()=>{{const s=document.querySelector({json.dumps(seletor)});if(!s)return JSON.stringify({{ok:false,step:'select-nao-encontrado'}});const label={json.dumps(label)};const value={json.dumps(value)};const o=[...s.options].find(i=>(value!==null&&String(i.value)===String(value))||(label!==null&&String(i.textContent||'').trim()===String(label).trim()));if(!o)return JSON.stringify({{ok:false,step:'opcao-nao-encontrada',label,value}});s.value=o.value;o.selected=true;s.dispatchEvent(new Event('input',{{bubbles:true}}));s.dispatchEvent(new Event('change',{{bubbles:true}}));return JSON.stringify({{ok:true,label:String(o.textContent||'').trim(),value:String(o.value||'')}});}})()""")
+    if not isinstance(retorno, dict) or not retorno.get("ok"):
+        raise RuntimeError(f"Falha ao selecionar opcao: seletor={seletor!r}; retorno={retorno!r}")
+    return retorno
+
+
+def _aplicar_competencia(competencia: date) -> None:
+    _selecionar_opcao(SELECT_MES, label=_MESES[competencia.month])
+    _selecionar_opcao(SELECT_ANO, label=str(competencia.year))
+
+
+def _estado_downloads() -> set[Path]:
+    return {a.resolve() for a in _downloads_dir().rglob("*") if a.is_file()}
+
+
+def _arquivo_estavel(arquivo: Path, leituras: int = 3, intervalo: float = 0.8) -> bool:
+    anterior = -1
+    estaveis = 0
+    for _ in range(max(leituras * 4, 8)):
+        if not arquivo.exists() or arquivo.suffix.lower() in {".crdownload", ".tmp", ".part"}:
+            time.sleep(intervalo)
+            continue
+        tamanho = arquivo.stat().st_size
+        if tamanho > 0 and tamanho == anterior:
+            estaveis += 1
+            if estaveis >= leituras:
+                return True
+        else:
+            estaveis = 0
+        anterior = tamanho
+        time.sleep(intervalo)
+    return False
+
+
+def _aguardar_download(antes: set[Path], timeout: int = 120) -> Path | None:
+    limite = time.time() + timeout
+    while time.time() < limite:
+        atuais = {a.resolve() for a in _downloads_dir().rglob("*") if a.is_file()}
+        candidatos = [a for a in atuais - antes if a.suffix.lower() not in {".crdownload", ".tmp", ".part"}]
+        candidatos.sort(key=lambda a: a.stat().st_mtime, reverse=True)
+        for candidato in candidatos:
+            if _arquivo_estavel(candidato):
+                return candidato
+        time.sleep(0.5)
+    return None
+
+
+def _mover_download(origem: Path, destino: Path) -> str:
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    if destino.exists() and destino.stat().st_size > 0:
+        origem.unlink(missing_ok=True)
+        return str(destino)
+    destino.unlink(missing_ok=True)
+    shutil.move(str(origem), str(destino))
+    if not destino.exists() or destino.stat().st_size <= 0:
+        raise RuntimeError(f"Arquivo final vazio ou inexistente: {destino}")
+    return str(destino)
+
+
+def _clicar_e_baixar(seletor: str, destino: Path, *, timeout: int = 120, fallback_js: bool = True) -> str:
+    if destino.exists() and destino.stat().st_size > 0:
+        print(f"[SULAMERICA] arquivo existente, pulando: {destino}")
+        return str(destino)
+    antes = _estado_downloads()
+    saida = cli("click", seletor, check=False, timeout=timeout)
+    arquivo = _aguardar_download(antes, timeout=timeout)
+    if arquivo is None and fallback_js:
+        seletor_json = json.dumps(seletor.replace("css=", "", 1))
+        retorno = js(f"""(()=>{{const e=document.querySelector({seletor_json});if(!e)return 'nao-encontrado';e.scrollIntoView({{block:'center'}});e.click();return 'clicado';}})()""")
+        if retorno != "clicado":
+            raise RuntimeError(f"Elemento de download nao encontrado: {seletor}; cli={saida[-300:]}")
+        arquivo = _aguardar_download(antes, timeout=timeout)
+    if arquivo is None:
+        raise RuntimeError(f"Download nao foi criado para {seletor}; cli={saida[-300:]}")
+    return _mover_download(arquivo, destino)
+
+
+def _aguardar_relatorios() -> bool:
+    return bool(esperar(lambda: js("(()=>!!(document.querySelector('#exportPDF')||document.querySelector('select[id=\\\"j_id5:apolices\\\"]')))()"), timeout=90))
+
+
+def _abrir_area_relatorios() -> str:
+    abas_antes = {aba["indice"] for aba in abas()}
+    cli("click", f"xpath={XPATH_FERRAMENTAS}")
+    def selecionar_nova_aba():
+        lista = abas()
+        novas = [aba for aba in lista if aba["indice"] not in abas_antes]
+        alvo = novas[-1] if novas else (lista[-1] if len(lista) > 1 else None)
+        if not alvo:
+            return None
+        if not alvo["atual"]:
+            cli("tab-select", str(alvo["indice"]), check=False)
+        return alvo
+    if not esperar(selecionar_nova_aba, timeout=30):
+        raise RuntimeError("O portal nao abriu a aba de relatorios")
+    if not _aguardar_relatorios():
+        raise RuntimeError("A area de relatorios nao carregou")
+    url = str(js("(()=>location.href||'')()") or "")
+    if not url:
+        raise RuntimeError("Nao foi possivel capturar a URL do menu de relatorios")
+    return url
+
+
+def _voltar_menu_relatorios(url_menu: str) -> None:
+    cli("goto", url_menu, check=False)
+    if not _aguardar_relatorios():
+        raise RuntimeError(f"Nao foi possivel retornar ao menu de relatorios: {url_menu}")
+
+
+def _mapear_apolices(opcoes: list[dict[str, str]], resultado: SulAmericaResultado) -> list[dict[str, Any]]:
+    return [
+        {"label": str(o.get("label") or "").strip(), "value": str(o.get("value") or ""),
+         "contrato": normalizar_contrato(o.get("label")), "id_empresa": 0}
+        for o in opcoes
+    ]
+
+
+def _baixar_cadastros(*, apolices, competencias, diretorio_saida: Path, resultado: SulAmericaResultado) -> None:
+    for competencia in competencias:
+        competencia_blob = competencia.strftime("%Y-%m")
+        for apolice in apolices:
+            try:
+                _selecionar_opcao(SELECT_APOLICE, label=apolice["label"], value=apolice["value"])
+                _aplicar_competencia(competencia)
+                nome = f"Relacao_Segurados_{normalizar_nome_arquivo(apolice['contrato'])}_{competencia_blob}.csv"
+                destino = diretorio_saida / "cadastro" / competencia_blob / "0" / nome
+                resultado.cadastros.append(_clicar_e_baixar(f"xpath={XPATH_CADASTRO}", destino, fallback_js=False))
+            except Exception as erro:
+                resultado.erros.append(f"cadastro; apolice={apolice['label']}; competencia={competencia_blob}; erro={erro}")
+
+
+def _entrar_gerencial() -> None:
+    cli("click", f"xpath={XPATH_MENU_GERENCIAL}")
+    if not esperar(lambda: bool(_listar_opcoes(SELECT_APOLICE)), timeout=90):
+        raise RuntimeError("A tela gerencial nao carregou as apolices")
+
+
+def _baixar_gerenciais(*, apolices, competencias, diretorio_saida: Path, resultado: SulAmericaResultado) -> None:
+    for competencia in competencias:
+        competencia_blob = competencia.strftime("%Y-%m")
+        for apolice in apolices:
+            try:
+                _selecionar_opcao(SELECT_APOLICE, label=apolice["label"], value=apolice["value"])
+                _aplicar_competencia(competencia)
+                if not esperar(lambda: bool(_listar_opcoes(SELECT_SUBFATURA)), timeout=45):
+                    resultado.pulados.append(f"gerencial; apolice={apolice['label']}; competencia={competencia_blob}; motivo=sem subfaturas")
+                    continue
+                for subfatura in _listar_opcoes(SELECT_SUBFATURA):
+                    try:
+                        _selecionar_opcao(SELECT_SUBFATURA, label=subfatura["label"], value=subfatura["value"])
+                        cli("click", "getByRole('link', { name: 'Atualizar' })")
+                        if not esperar(lambda: js("(()=>{const e=document.querySelector('#exportPDF\\\\:exportIconCSV');return !!(e&&!e.hasAttribute('disabled'));})()"), timeout=90):
+                            raise RuntimeError("Botao CSV nao ficou disponivel apos Atualizar")
+                        nome = f"{normalizar_nome_arquivo(subfatura['label'], 90)}_{normalizar_nome_arquivo(apolice['contrato'])}_{competencia_blob}.csv"
+                        destino = diretorio_saida / "relatorios-gerenciais" / "upload" / competencia_blob / "0" / "Gerencial" / nome
+                        resultado.gerenciais.append(_clicar_e_baixar(f"css={SELETOR_CSV_GERENCIAL}", destino))
+                    except Exception as erro:
+                        resultado.erros.append(f"gerencial; apolice={apolice['label']}; subfatura={subfatura.get('label')}; competencia={competencia_blob}; erro={erro}")
+            except Exception as erro:
+                resultado.erros.append(f"gerencial; apolice={apolice['label']}; competencia={competencia_blob}; erro={erro}")
+
+
+def _estado_login() -> dict[str, Any]:
+    retorno = js("""(()=>JSON.stringify({possuiLogin:!!document.querySelector('#formLogin'),possuiHome:!!document.querySelector('app-home'),possuiRecaptcha:!!document.querySelector('iframe[src*=\"recaptcha\"],.g-recaptcha'),possuiFerramentas:!!document.evaluate('/html/body/app-root/app-home/div/app-card-ferramentas/div/div[2]/a[9]',document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue,mensagem:String(document.querySelector('.alert,.erro,.error,[role=\"alert\"]')?.innerText||'').replace(/\\s+/g,' ').trim()}))()""")
+    return retorno if isinstance(retorno, dict) else {}
+
+
+def _aguardar_resultado_login(timeout: float = 90, intervalo: float = 1.0) -> dict[str, Any]:
+    inicio = time.time()
+    ultimo = {}
+    while time.time() < inicio + timeout:
+        ultimo = _estado_login()
+        if ultimo.get("possuiFerramentas"):
+            return {**ultimo, "status": "autenticado"}
+        if ultimo.get("possuiHome"):
+            time.sleep(intervalo)
+            continue
+        if ultimo.get("mensagem"):
+            return {**ultimo, "status": "erro_login"}
+        if time.time() - inicio >= 8 and ultimo.get("possuiRecaptcha") and ultimo.get("possuiLogin"):
+            return {**ultimo, "status": "recaptcha"}
+        time.sleep(intervalo)
+    return {**ultimo, "status": "timeout"}
+
+def diagnosticar_ambiente_navegador() -> dict[str, Any]:
+    retorno = js(
+        """(() => JSON.stringify({
+          url: String(location.href || ""),
+          titulo: String(document.title || ""),
+          language: String(
+            navigator.language || ""
+          ),
+          languages: Array.from(
+            navigator.languages || []
+          ),
+          platform: String(
+            navigator.platform || ""
+          ),
+          vendor: String(
+            navigator.vendor || ""
+          ),
+          userAgent: String(
+            navigator.userAgent || ""
+          ),
+          timezone: String(
+            Intl.DateTimeFormat()
+              .resolvedOptions()
+              .timeZone || ""
+          ),
+          hardwareConcurrency: Number(
+            navigator.hardwareConcurrency || 0
+          ),
+          deviceMemory: (
+            navigator.deviceMemory ?? null
+          ),
+          viewport: {
+            width: Number(
+              window.innerWidth || 0
+            ),
+            height: Number(
+              window.innerHeight || 0
+            ),
+            screenWidth: Number(
+              screen.width || 0
+            ),
+            screenHeight: Number(
+              screen.height || 0
+            ),
+            pixelRatio: Number(
+              window.devicePixelRatio || 1
+            )
+          }
+        }))()"""
+    )
+
+    if isinstance(
+        retorno,
+        dict,
+    ):
+        return retorno
+
+    return {}
+
+def _executar_conta(*, conta: ContaSulAmerica, competencias: list[date], diretorio_saida: Path, resultado: SulAmericaResultado) -> None:
+    pasta_execucao = Path(
+        tempfile.mkdtemp(
+            prefix="execucao_",
+            dir=str(
+                DIRETORIO_RUNTIME
+            ),
+        )
+    )
+    perfil_base = Path(os.getenv("SULAMERICA_PROFILE_DIR", str(DIRETORIO_RUNTIME / "sulamerica_profiles")))
+    perfil_conta = perfil_base / normalizar_nome_arquivo(conta.conta, 80)
+    perfil_conta.mkdir(parents=True, exist_ok=True)
+    _TLS.cwd = pasta_execucao
+    _TLS.downloads = pasta_execucao / "downloads"
+    _TLS.profile = perfil_conta
+    _TLS.conta = conta.conta
+    _TLS.session = f"sa3-{normalizar_nome_arquivo(conta.login, 20)}-{os.getpid()}-{int(time.time()*1000)}"
+    try:
+        caminho_config = _ensure_cli_config(
+            pasta_execucao
+        )
+
+        print(
+            f"[SULAMERICA/{conta.conta}] "
+            f"cwd={_cwd()}"
+        )
+
+        print(
+            f"[SULAMERICA/{conta.conta}] "
+            f"profile={perfil_conta}"
+        )
+
+        print(
+            f"[SULAMERICA/{conta.conta}] "
+            f"config={caminho_config}"
+        )
+
+        cli(
+            "open",
+            "--config",
+            str(caminho_config),
+            URL_LOGIN,
+            timeout=180,
+        )
+
+        ambiente_navegador = (
+            diagnosticar_ambiente_navegador()
+        )
+
+        print(
+            f"[SULAMERICA/{conta.conta}] "
+            "ambiente_navegador="
+            f"{json.dumps(
+                ambiente_navegador,
+                ensure_ascii=False,
+            )}"
+        )
+
+        pagina_login_pronta = esperar(
+            lambda: bool(
+                js(
+                    """(() => {
+                      const usuario =
+                        document.querySelector(
+                          '#formLogin div:nth-child(1) input'
+                        );
+
+                      const senha =
+                        document.querySelector(
+                          '#formLogin div:nth-child(2) input'
+                        );
+
+                      const botao =
+                        document.querySelector(
+                          '#formLogin div:nth-child(3) input'
+                        );
+
+                      return !!(
+                        usuario
+                        && senha
+                        && botao
+                        && !usuario.disabled
+                        && !senha.disabled
+                        && !botao.disabled
+                      );
+                    })()"""
+                )
+            ),
+            timeout=90,
+            intervalo=1.0,
+        )
+
+        if not pagina_login_pronta:
+            salvar_diagnostico(
+                etapa="login_nao_carregado",
+                conta=conta.conta,
+            )
+
+            raise RuntimeError(
+                "A pagina de login nao ficou pronta."
+            )
+
+        time.sleep(
+            2.0
+        )
+        cli("fill", 'xpath=//*[@id="formLogin"]/div[1]/input', conta.login)
+        cli("fill", 'xpath=//*[@id="formLogin"]/div[2]/input', conta.senha, sensivel=True)
+        cli("click", 'xpath=//*[@id="formLogin"]/div[3]/input')
+        estado = _aguardar_resultado_login()
+        if estado.get("status") == "recaptcha":
+            salvar_diagnostico("recaptcha_login", conta.conta)
+            raise SulAmericaRecaptchaError("O portal solicitou reCAPTCHA durante a autenticacao.")
+        if estado.get("status") != "autenticado":
+            salvar_diagnostico(f"{estado.get('status')}_login", conta.conta)
+            raise RuntimeError(f"Login nao concluido: {estado!r}")
+        salvar_diagnostico("apos_login", conta.conta)
+        url_menu = _abrir_area_relatorios()
+        opcoes = _listar_opcoes(SELECT_APOLICE)
+        if not opcoes:
+            raise SulAmericaSemDadosError("Nenhuma apolice disponivel para a credencial")
+        apolices = _mapear_apolices(opcoes, resultado)
+        _baixar_cadastros(apolices=apolices, competencias=competencias, diretorio_saida=diretorio_saida, resultado=resultado)
+        _voltar_menu_relatorios(url_menu)
+        _entrar_gerencial()
+        _baixar_gerenciais(apolices=apolices, competencias=competencias, diretorio_saida=diretorio_saida, resultado=resultado)
+    except SulAmericaRecaptchaError as erro:
+        resultado.pulados.append(f"conta={conta.conta}; motivo=recaptcha; detalhe={erro}")
+    except Exception as erro:
+        resultado.erros.append(f"conta={conta.conta}; erro={erro}")
+    finally:
+        cli("close", check=False)
+        shutil.rmtree(pasta_execucao, ignore_errors=True)
+        _TLS.cwd = _TLS.downloads = _TLS.profile = None
+        _TLS.conta = _TLS.session = ""
+
+
+class SulAmericaWebscraping:
+    def executar_downloads(self, *, dtcompetenciaini, dtcompetenciafim, diretorio_saida: str | Path, status_write=print, **_kw) -> SulAmericaResultado:
+        global _BIN
+        _BIN = None
+        emit = status_write or (lambda *_args, **_kwargs: None)
+        resultado = SulAmericaResultado(ok=False)
+        diretorio_saida = Path(diretorio_saida).resolve()
+        diretorio_saida.mkdir(parents=True, exist_ok=True)
+        try:
+            validar_ambiente_grafico()
+            emit(f"[SULAMERICA] playwright-cli={_bin()}")
+            competencias = list(iterar_competencias(dtcompetenciaini, dtcompetenciafim))
+            contas = carregar_contas_sulamerica()
+            emit(f"[SULAMERICA] contas={len(contas)}; competencias={len(competencias)}; id_empresa=0")
+            for conta in contas:
+                _executar_conta(conta=conta, competencias=competencias, diretorio_saida=diretorio_saida, resultado=resultado)
+            resultado.ok = bool(resultado.arquivos)
+            resultado.detail = f"cadastros={len(resultado.cadastros)}; gerenciais={len(resultado.gerenciais)}; pulados={len(resultado.pulados)}; erros={len(resultado.erros)}"
+            if not resultado.ok:
+                raise RuntimeError(f"Nenhum arquivo foi baixado. Pulados={resultado.pulados}; erros={resultado.erros}")
+        except Exception as erro:
+            resultado.detail = str(erro)
+            if not resultado.erros or str(erro) not in resultado.erros[-1]:
+                resultado.erros.append(str(erro))
+        return resultado
+
+    def sul_america(self, **kwargs) -> SulAmericaResultado:
+        return self.executar_downloads(**kwargs)
+
+
+def main() -> int:
+    competencia_inicial = "2026-10"
+    competencia_final = "2026-10"
+    diretorio_saida = DIRETORIO_RUNTIME / "arquivos_sulamerica"
+    resultado = SulAmericaWebscraping().executar_downloads(
+        dtcompetenciaini=competencia_inicial,
+        dtcompetenciafim=competencia_final,
+        diretorio_saida=diretorio_saida,
+        status_write=print,
+    )
+    print("\n" + "=" * 70)
+    print("RESULTADO DA EXECUCAO")
+    print("=" * 70)
+    print(f"OK: {resultado.ok}")
+    print(f"Detalhe: {resultado.detail}")
+    for titulo, itens in (("CADASTROS", resultado.cadastros), ("GERENCIAIS", resultado.gerenciais), ("PULADOS", resultado.pulados), ("ERROS", resultado.erros)):
+        if itens:
+            print(f"\n{titulo}:")
+            for item in itens:
+                print(f"  - {item}")
+    return 0 if resultado.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = [
+    "SulAmericaResultado", "SulAmericaSemDadosError", "SulAmericaRecaptchaError",
+    "SulAmericaWebscraping", "carregar_contas_sulamerica", "normalizar_contrato", "main",
+]
